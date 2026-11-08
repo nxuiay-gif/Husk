@@ -1,0 +1,145 @@
+From 96ae1d78deb90c1de48e17b5dfb15ab2dccd2a1c Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sun, 8 Nov 2026 21:59:48 +0800
+Subject: [PATCH] Fix JIT-less Java launch without certificate
+
+---
+ src/app/Husk/Compatibility.swift               | 6 +++---
+ src/app/Husk/ItemPages.swift                   | 6 +++---
+ src/app/Husk/JITLess.swift                     | 7 ++++++-
+ src/app/Husk/Launcher.swift                    | 2 +-
+ src/translation-layer-next/husk-tl-dvm.c       | 5 +++++
+ src/translation-layer-next/husk-tl-unity-app.c | 2 +-
+ 6 files changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/src/app/Husk/Compatibility.swift b/src/app/Husk/Compatibility.swift
+index 82e7b3b..b5338e5 100644
+--- a/src/app/Husk/Compatibility.swift
++++ b/src/app/Husk/Compatibility.swift
+@@ -141,7 +141,7 @@ final class CompatibilityStore: ObservableObject {
+ 
+     func entry(_ package: String?) -> Entry? {
+         guard let package else { return nil }
+-        if JITLess.enabled, let e = jitlessEntries[package] { return e }
++        if JITLess.active, let e = jitlessEntries[package] { return e }
+         return entries[package]
+     }
+ 
+@@ -184,7 +184,7 @@ final class CompatibilityStore: ObservableObject {
+     /// How this report ran: Play without JIT, or which debugger turned JIT on. The JIT-less list on the site is the
+     /// team's own results; player reports all go to the same list, tagged with this.
+     static var jitMethod: String {
+-        if JITLess.enabled { return "None (Play without JIT)" }
++        if JITLess.active { return "None (Play without JIT)" }
+         switch JITCoordinator.shared.resolvedMethod {
+         case .builtIn: return "StikJIT (built in)"
+         case .stikDebug: return "StikDebug"
+@@ -365,7 +365,7 @@ struct CompatReportSheet: View {
+                 } header: {
+                     Text("Your Name")
+                 } footer: {
+-                    Text("Sent with it: \(CompatibilityStore.device), iOS \(UIDevice.current.systemVersion), Husk build \(CompatibilityStore.build), \(JITLess.enabled ? "Play without JIT" : "JIT from \(CompatibilityStore.jitMethod)"). It shows on itslevii.dev for everyone.")
++                    Text("Sent with it: \(CompatibilityStore.device), iOS \(UIDevice.current.systemVersion), Husk build \(CompatibilityStore.build), \(JITLess.active ? "Play without JIT" : "JIT from \(CompatibilityStore.jitMethod)"). It shows on itslevii.dev for everyone.")
+                 }
+                 Section {
+                     Toggle("Attach my log", isOn: $attachLog)
+diff --git a/src/app/Husk/ItemPages.swift b/src/app/Husk/ItemPages.swift
+index 5f370fd..398d106 100644
+--- a/src/app/Husk/ItemPages.swift
++++ b/src/app/Husk/ItemPages.swift
+@@ -300,7 +300,7 @@ struct GamePage: View {
+         .id(jit.attachGeneration)
+         .onAppear {
+             // Kept until JIT is on: this page is rebuilt when it attaches (.id above), and plays then.
+-            guard Router.shared.autoPlay == app.id, blockedBy == nil, Launcher.jitOn || JITLess.enabled else { return }
++            guard Router.shared.autoPlay == app.id, blockedBy == nil, Launcher.jitOn || JITLess.active else { return }
+             Router.shared.autoPlay = nil
+             play()
+         }
+@@ -309,7 +309,7 @@ struct GamePage: View {
+     /// Play: in JIT-less mode the game's libraries are converted and signed first (once); with Geode on, whatever it is missing
+     /// (a newer release, its resources) is fetched first.
+     private func play() {
+-        if JITLess.enabled, SigningCertificate.credentials() != nil, preparing == nil {
++        if JITLess.active, preparing == nil {
+             preparing = "Preparing for JIT-less mode…"
+             Task {
+                 do {
+@@ -432,7 +432,7 @@ struct GamePage: View {
+                 .frame(maxWidth: .infinity).frame(height: 50)
+         } else if blockedBy != nil {
+             BigButton(title: "Close Husk to Play", systemImage: "xmark.circle", prominent: false) { confirmQuit = true }
+-        } else if !Launcher.jitOn && !JITLess.enabled {
++        } else if !Launcher.jitOn && !JITLess.active {
+             if jit.busy {
+                 HStack(spacing: 10) { ProgressView(); Text(jit.status ?? "Turning on JIT…").foregroundStyle(.secondary) }
+                     .frame(maxWidth: .infinity).frame(height: 50)
+diff --git a/src/app/Husk/JITLess.swift b/src/app/Husk/JITLess.swift
+index 1314790..45a23fc 100644
+--- a/src/app/Husk/JITLess.swift
++++ b/src/app/Husk/JITLess.swift
+@@ -15,6 +15,11 @@ enum JITLess {
+         set { UserDefaults.standard.set(newValue, forKey: key) }
+     }
+ 
++    /// Turning the preference on is not enough to run without JIT: every Android library must first be converted into a signed
++    /// dylib, and that requires the certificate which installed Husk. Treating the preference alone as ready makes the loader turn
++    /// executable memory off with no dylibs to use (most visibly, Java's libcore then cannot initialise java.lang.System).
++    static var active: Bool { enabled && SigningCertificate.credentials() != nil }
++
+     /// Prebuilt: the app's Frameworks, where the installer signs them with the app.
+     static var bundledDirectory: String? { Bundle.main.privateFrameworksPath }
+ 
+@@ -109,7 +114,7 @@ enum JITLess {
+     /// Before a game starts: no executable memory is made in this run (even when JIT is on, so the test is real), and libraries
+     /// come from the dylibs. A library with no dylib cannot load, and the log says which one.
+     static func prepareLaunch() {
+-        guard enabled else { return }
++        guard active else { return }
+         setenv("TL_NO_XMEM", "1", 1)
+         let dirs = [bundledDirectory, cacheDirectory.path].compactMap { $0 }.joined(separator: ":")
+         tl_ld_set_aot_dir(dirs)
+diff --git a/src/app/Husk/Launcher.swift b/src/app/Husk/Launcher.swift
+index 2fd397c..eaf2338 100644
+--- a/src/app/Husk/Launcher.swift
++++ b/src/app/Husk/Launcher.swift
+@@ -303,7 +303,7 @@ struct HomeView: View {
+             if let busy = store.busy { BusyStrip(text: busy) }
+             if let busy = host.busy { BusyStrip(text: busy) }
+             DownloadsNotice()
+-            if !Launcher.jitOn && !JITLess.enabled { JITNotice() }
++            if !Launcher.jitOn && !JITLess.active { JITNotice() }
+         }
+     }
+ }
+diff --git a/src/translation-layer-next/husk-tl-dvm.c b/src/translation-layer-next/husk-tl-dvm.c
+index b553576..cfc1fb1 100644
+--- a/src/translation-layer-next/husk-tl-dvm.c
++++ b/src/translation-layer-next/husk-tl-dvm.c
+@@ -2422,6 +2422,11 @@ bool tl_dvm_load_natives(const char *libdir)
+     /* core-icu4j's natives (charset converters, ICU's Java side), which ART loads with the runtime */
+     if (!tl_jni_load_library("libicu_jni.so")) tl_log_line("dvm: libicu_jni.so did not load");
+     if (tl_jni_pending()) { char b[300]; tl_log_line("dvm: loading libcore's natives threw %s", tl_dvm_describe_pending(b, sizeof(b)) ? b : "?"); tl_jni_clear(); }
++    /* System.<clinit> calls OsConstantsHolder and libcore.io.Linux immediately. Without libjavacore/libopenjdk their registered
++     * natives do not exist; continuing only poisons java.lang.System with a secondary ExceptionInInitializerError and makes every
++     * later use look like an app-side NoClassDefFoundError. Leave the boot classes uninitialised and let the launcher report that
++     * the runtime itself could not be loaded. */
++    if (!ok) return false;
+     /* What ART initialises as it starts, before any app code: the core classes, in an order where each one's <clinit> finds what
+      * it needs (System's pulls in most of java.lang and java.util.concurrent). */
+     static const char *const order[] = { "java/lang/Object", "java/lang/Class", "java/lang/String", "java/lang/System",
+diff --git a/src/translation-layer-next/husk-tl-unity-app.c b/src/translation-layer-next/husk-tl-unity-app.c
+index c8962b3..849665f 100644
+--- a/src/translation-layer-next/husk-tl-unity-app.c
++++ b/src/translation-layer-next/husk-tl-unity-app.c
+@@ -271,7 +271,7 @@ static void *java_boot(void *arg)
+     snprintf(v, sizeof(v), "%s/com.android.i18n/lib64", r); tl_ld_add_search_dir(v);
+     snprintf(v, sizeof(v), "%s/com.android.conscrypt/lib64", r); tl_ld_add_search_dir(v);
+     snprintf(v, sizeof(v), "%s/com.android.art/lib64", r);
+-    if (!tl_dvm_load_natives(v)) tl_log_line("java: libcore's natives did not all load");
++    if (!tl_dvm_load_natives(v)) { tl_log_line("java: libcore's required natives did not load; the runtime cannot start"); *ok = false; return NULL; }
+     if (husk_aosp_using()) {
+         snprintf(v, sizeof(v), "%s/aosp/lib64", r); tl_ld_add_search_dir(v);
+         snprintf(v, sizeof(v), "%s/lib64", r); tl_ld_add_search_dir(v);
+-- 
+2.51.1
