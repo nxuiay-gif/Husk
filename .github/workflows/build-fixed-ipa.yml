@@ -1,0 +1,87 @@
+name: Build Fixed Husk IPA
+
+on:
+  push:
+    branches:
+      - fix/jitless-java-runtime
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+
+      - name: Apply Java runtime fix
+        run: git apply .github/husk-java-fix.patch
+
+      - name: Install build tools
+        run: brew install xcodegen qemu
+
+      - name: Restore runtime assets from official Husk 3.4
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --retry-delay 5 \
+            -o /tmp/Husk-3.4.ipa \
+            https://github.com/Leviidev/Husk/releases/download/3.4/Husk.ipa
+          rm -rf /tmp/husk-official
+          ditto -x -k /tmp/Husk-3.4.ipa /tmp/husk-official
+          APP=/tmp/husk-official/Payload/Husk.app
+
+          test -f "$APP/Frameworks/libqemu-aarch64-softmmu.dylib"
+          test -f "$APP/Frameworks/libANGLE-shared.dylib"
+          test -d "$APP/Frameworks/MoltenVK.framework"
+          test -d "$APP/java-runtime"
+          test -f "$APP/java-runtime/husk-framework.dex"
+
+          mkdir -p build/ios-arm64/lib build/ios-arm64/sysroot/lib
+          cp "$APP/Frameworks/libqemu-aarch64-softmmu.dylib" build/ios-arm64/lib/
+          cp "$APP/Frameworks/libANGLE-shared.dylib" build/ios-arm64/sysroot/lib/
+          cp "$APP/Frameworks/libhuskps4.dylib" build/ios-arm64/lib/
+
+          rm -rf build/ios-arm64/lib/MoltenVK.xcframework
+          xcodebuild -create-xcframework \
+            -framework "$APP/Frameworks/MoltenVK.framework" \
+            -output build/ios-arm64/lib/MoltenVK.xcframework
+
+          mkdir -p guests/phase0 third_party/build/qemu-10.0.12-utm/pc-bios
+          cp "$APP/vmlinuz-virt" "$APP/initramfs-virt" guests/phase0/
+          cp -R "$APP/pc-bios/." third_party/build/qemu-10.0.12-utm/pc-bios/
+          bzip2 -c "$APP/edk2-aarch64-code.fd" \
+            > third_party/build/qemu-10.0.12-utm/pc-bios/edk2-aarch64-code.fd.bz2
+
+          rm -rf build/java-runtime build/android-system
+          ditto "$APP/java-runtime" build/java-runtime
+          if [ -d "$APP/android-system" ]; then
+            ditto "$APP/android-system" build/android-system
+          fi
+
+      - name: Build on-device pairing library
+        run: |
+          rustup target add aarch64-apple-ios
+          ./scripts/build_rppairing_ios.sh
+
+      - name: Build fixed IPA
+        env:
+          DD: /tmp/husk-fixed-derived-data
+        run: ./scripts/package_ipa.sh build/Husk-fixed.ipa
+
+      - name: Verify IPA
+        run: |
+          unzip -t build/Husk-fixed.ipa
+          unzip -l build/Husk-fixed.ipa | grep -q 'Payload/Husk.app/java-runtime/husk-framework.dex'
+          unzip -l build/Husk-fixed.ipa | grep -q 'Payload/Husk.app/Frameworks/libqemu-aarch64-softmmu.dylib'
+
+      - name: Upload fixed IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Husk-fixed-3.4
+          path: build/Husk-fixed.ipa
+          if-no-files-found: error
+          retention-days: 14
